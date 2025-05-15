@@ -66,6 +66,8 @@ _AGENT_COLOR = _DARKORANGE
 _AGENT_LOADED_COLOR = _RED
 _AGENT_DIR_COLOR = _BLACK
 _GOAL_COLOR = (60, 60, 60)
+_DEACTIVATION_COLOR = (128, 128, 128, 120)
+_ACTIVATION_COLOR = (0, 255, 0, 120)
 _CARRIER_COLOR = _MAROON
 _LOADER_AGENT = _BLUE
 
@@ -122,6 +124,8 @@ class Viewer(object):
         self.window.dispatch_events()
 
         self._draw_grid()
+        self._draw_activation_region(env)
+        self._draw_deactivation_regions(env)
         self._draw_goals(env)
         self._draw_shelfs(env)
         self._draw_agents(env)
@@ -134,6 +138,66 @@ class Viewer(object):
             arr = arr[::-1, :, 0:3]
         self.window.flip()
         return arr if return_rgb_array else self.isopen
+    
+    def _draw_activation_region(self, env):
+        # Color the 0,0 tile
+        batch = pyglet.graphics.Batch()
+        batch.add(
+            4,
+            gl.GL_QUADS,
+            None,
+            (
+                "v2f",
+                (
+                    1,  # TL - X
+                    (self.grid_size + 1) * (self.rows - 1) + 1,  # TL - Y
+                    (self.grid_size + 1) * 1,  # TR - X
+                    (self.grid_size + 1) * (self.rows - 1) + 1,  # TR - Y
+                    (self.grid_size + 1) * 1,  # BR - X
+                    (self.grid_size + 1) * self.rows,  # BR - Y
+                    1,  # BL - X
+                    (self.grid_size + 1) * self.rows,  # BL - Y
+                ),
+            ),
+            ("c4B", 4 * _ACTIVATION_COLOR),
+        )
+        batch.draw()
+        
+    
+    def _draw_deactivation_regions(self, env):
+        batch = pyglet.graphics.Batch()
+        # Draw top rows -- for now only use the top row as deactivation region
+        for x in range(1, self.cols):
+            for y in [0]: # used to support bottom row as well with self.rows - 1
+                self._draw_deactivation_tile(batch, x, y)
+        # # Draw left and right columns (excluding corners already drawn)
+        # for y in range(1, self.rows - 1):
+        #     for x in [0, self.cols - 1]:
+        #         self._draw_deactivation_tile(batch, x, y)
+        batch.draw()
+
+    def _draw_deactivation_tile(self, batch, x, y):
+        # y is in grid coordinates, need to flip for rendering
+        y_render = self.rows - y - 1
+        batch.add(
+            4,
+            gl.GL_QUADS,
+            None,
+            (
+                "v2f",
+                (
+                    (self.grid_size + 1) * x + 1,  # TL - X
+                    (self.grid_size + 1) * y_render + 1,  # TL - Y
+                    (self.grid_size + 1) * (x + 1),  # TR - X
+                    (self.grid_size + 1) * y_render + 1,  # TR - Y
+                    (self.grid_size + 1) * (x + 1),  # BR - X
+                    (self.grid_size + 1) * (y_render + 1),  # BR - Y
+                    (self.grid_size + 1) * x + 1,  # BL - X
+                    (self.grid_size + 1) * (y_render + 1),  # BL - Y
+                ),
+            ),
+            ("c4B", 4 * _DEACTIVATION_COLOR),
+        )
 
     def _draw_grid(self):
         batch = pyglet.graphics.Batch()

@@ -38,6 +38,9 @@ class Agent(Entity):
         self.fixing_clash = 0
         self.type = agent_type
         self.target = 0
+        self.deactivated = False
+        self.pending_deactivation = False
+        self.pending_activation = False
 
     def req_location(self, grid_size) -> Tuple[int, int]:
         if self.req_action != Action.FORWARD:
@@ -63,6 +66,30 @@ class Agent(Entity):
             return wraplist[(wraplist.index(self.dir) - 1) % len(wraplist)]
         else:
             return self.dir
+        
+    def deactivate(self):
+        """Deactivates the agent, making it unable to move or perform actions."""
+        # Ensure the agent is not already deactivated, currently busy, or carrying a shelf
+        if self.deactivated or self.busy or self.carrying_shelf:
+            self.pending_deactivation = True
+            self.pending_activation = False
+            return
+        self.deactivated = True
+        self.pending_deactivation = False
+        self.req_action = Action.NOOP
+        self.carrying_shelf = None
+        self.path = []
+        self.busy = False
+        self.target = 0
+
+    def revive(self, warehouse=None):
+        """Revives the agent, allowing it to move and perform actions again."""
+        # Ensure the agent is deactivated before reviving
+        if not self.deactivated:
+            self.pending_deactivation = False
+            return
+        self.pending_activation = False
+        self.deactivated = False
 
 class Shelf(Entity):
     counter = 0
@@ -166,6 +193,7 @@ class Warehouse(gym.Env):
         self.num_agvs = num_agvs
         self.num_pickers = num_pickers
         self.num_agents = num_agvs + num_pickers
+        self.agent_types_list = [AgentType.AGV for _ in range(num_agvs)] + [AgentType.PICKER for _ in range(num_pickers)]
 
         self._make_layout_from_params(shelf_columns, shelf_rows, column_height)
         # If no Pickers are generated, AGVs can perform picks independently
@@ -194,7 +222,7 @@ class Warehouse(gym.Env):
 
         self.request_queue_size = request_queue_size
         self.request_queue = []
-        self.rack_groups = find_sections(list([loc for loc in self.action_id_to_coords_map.values() if (loc[1], loc[0]) not in self.goals]))
+        self.rack_groups = find_sections(list([loc for loc in self.action_id_to_coords_map.values() if (loc[1], loc[0]) not in self.goals + self.deactivation_region + self.activation_region]))
         self.agents: List[Agent] = []
         self.stuck_counters = []
         self.renderer = None
@@ -232,16 +260,23 @@ class Warehouse(gym.Env):
         highway_xs = get_highway_lanes_indices(self.grid_size[1], self.column_width)
 
         def highway_func(x, y):
-            return x in highway_xs or y in highway_ys or y >= self.grid_size[0] - 1 - self._bottom_rows
+            return (x in highway_xs or y in highway_ys or y >= self.grid_size[0] - 1 - self._bottom_rows)
 
         self.goals = [
             (i, self.grid_size[0] - 1)
             for i in range(self.grid_size[1]) if not i in highway_xs
         ]
+        self.deactivation_region = [
+            (i, 0) for i in range(1, self.grid_size[1])
+        ]
+
+        self.activation_region = [(0,0)]
+
         self.num_goals = len(self.goals)
+        self.coord_map = self.goals + self.deactivation_region + self.activation_region
 
         self.highways = np.zeros(self.grid_size, dtype=np.int32)
-        self.action_id_to_coords_map = {i+1: (x, y) for i, (y, x) in enumerate(self.goals)}
+        self.action_id_to_coords_map = {i+1: (x, y) for i, (y, x) in enumerate(self.coord_map)}
         item_loc_index=len(self.action_id_to_coords_map)+1
         for x in range(self.grid_size[1]):
             for y in range(self.grid_size[0]):
@@ -249,6 +284,13 @@ class Warehouse(gym.Env):
                 if not highway_func(x, y) and (x, y) not in self.goals:
                     self.action_id_to_coords_map[item_loc_index] = (y, x)
                     item_loc_index+=1
+
+        # print(f"Grid size: {self.grid_size}")
+        # print(f"Highway Ys: {highway_ys}")
+        # print(f"Highway Xs: {highway_xs}")
+        # print(f"Goals: {self.goals}")
+        # print(f"Deactivation region: {self.deactivation_region}")
+        # print(f"Coord map: {self.coord_map}")
 
     def _is_highway(self, x: int, y: int) -> bool:
         return self.highways[y, x]
@@ -331,7 +373,7 @@ class Warehouse(gym.Env):
         request_item_map = np.zeros(len(self.shelfs))
         requested_shelf_ids = [shelf.id for shelf in self.request_queue]
         for id_, coords in self.action_id_to_coords_map.items():
-            if (coords[1], coords[0]) not in self.goals:
+            if (coords[1], coords[0]) not in self.goals and coords[0] != 0:
                 if self.grid[CollisionLayers.SHELVES, coords[0], coords[1]] in requested_shelf_ids:
                     request_item_map[id_ - len(self.goals) - 1] = 1
         return request_item_map
@@ -339,7 +381,7 @@ class Warehouse(gym.Env):
     def get_empty_shelf_information(self) -> np.ndarray[int]:
         empty_item_map = np.zeros(len(self.shelfs))
         for id_, coords in self.action_id_to_coords_map.items():
-            if (coords[1], coords[0]) not in self.goals:
+            if (coords[1], coords[0]) not in self.goals and coords[0] != 0:
                 if self.grid[CollisionLayers.SHELVES, coords[0], coords[1]] == 0 and (
                     self.grid[CollisionLayers.CARRIED_SHELVES, coords[0], coords[1]] == 0
                     or self.agents[
@@ -347,7 +389,7 @@ class Warehouse(gym.Env):
                     ].req_action
                     not in [Action.NOOP, Action.TOGGLE_LOAD]
                 ):
-                    empty_item_map[id_ - len(self.goals) - 1] = 1
+                    empty_item_map[id_ - len(self.goals) - len(self.deactivation_region) - len(self.activation_region) - 1] = 1
         return empty_item_map
 
     def attribute_macro_actions(self, macro_actions: List[int]) -> Tuple[int, int]:
@@ -356,11 +398,20 @@ class Warehouse(gym.Env):
         # Logic for Macro Actions
         for agent, macro_action in zip(self.agents, macro_actions):
             # Initialize action for step
-            agent.req_action = Action.NOOP
+            agent.req_action = Action.NOOP if agent.pending_deactivation else Action.DEACTIVATE
+            set_to_deactivate = macro_action in self.action_id_to_coords_map and self.action_id_to_coords_map[macro_action] in self.deactivation_region
+            set_to_activate = macro_action in self.action_id_to_coords_map and self.action_id_to_coords_map[macro_action] in self.activation_region
             # Collision avoidance logic
             if agent.fixing_clash > 0:
                 agent.fixing_clash -= 1
             if not agent.busy:
+                # Check to see if the target is a deactivation action
+                if set_to_deactivate:
+                    agent.pending_deactivation = True
+                if (agent.deactivated or agent.pending_deactivation) and set_to_activate:
+                    # If agent is deactivated or pending and set to a deactivate location again, revive it
+                    agent.pending_activation = True
+
                 agent.target = 0
                 if macro_action != 0:
                     agent.path = self.find_path((agent.y, agent.x), self.action_id_to_coords_map[macro_action], agent, care_for_agents=False)
@@ -374,13 +425,13 @@ class Warehouse(gym.Env):
                 if agent.path == []:
                     if agent.type in [AgentType.AGV, AgentType.AGENT]:
                         agent.req_action = Action.TOGGLE_LOAD
-                    if agent.type == AgentType.PICKER:
+                    if agent.type == AgentType.PICKER or agent.pending_deactivation or agent.pending_activation:
                         agent.busy = False
                 else:
                     agent.req_action = get_next_micro_action(agent.x, agent.y, agent.dir, agent.path[0])
                     agvs_distance_travelled += int(agent.type == AgentType.AGV)
                     pickrs_distance_travelled += int(agent.type == AgentType.PICKER)
-                if len(agent.path) == 1:
+                if len(agent.path) == 1 and not agent.pending_deactivation or agent.pending_activation:
                     # If agent is at the end of a path and carrying a shelf and the target location is already occupied, restart agent
                     if agent.carrying_shelf and self.grid[CollisionLayers.SHELVES, agent.path[-1][1], agent.path[-1][0]]:
                         agent.req_action = Action.NOOP
@@ -573,7 +624,14 @@ class Warehouse(gym.Env):
 
     def execute_micro_actions(self, rewards: np.ndarray[int]) -> np.ndarray[int]:
         for agent in self.agents:
-            if agent.req_action == Action.FORWARD:
+            if agent.deactivated and agent.req_action != Action.ACTIVATE:
+                # If agent is deactivated, it should not move or perform any actions but give a small reward
+                rewards[agent.id - 1] += 0.001
+            elif agent.req_action == Action.ACTIVATE and agent.deactivated:
+                agent.revive(warehouse=self)
+            elif agent.req_action == Action.DEACTIVATE:
+                agent.deactivate()
+            elif agent.req_action == Action.FORWARD:
                 self._execute_forward(agent)
             elif agent.req_action in [Action.LEFT, Action.RIGHT]:
                 self._execute_rotation(agent)
@@ -651,6 +709,10 @@ class Warehouse(gym.Env):
             for y, x, dir_, agent_type in zip(*agent_locs, agent_dirs, self._agent_types)
         ]
 
+        # Set deactivation status for agents in the top row
+        for agent in self.agents:
+            agent.deactivated = self._is_deactivation_region(agent.x, agent.y)
+
         self.stuck_counters = [StuckCounter((agent.x, agent.y)) for agent in self.agents]
         self._recalc_grid()
 
@@ -658,7 +720,14 @@ class Warehouse(gym.Env):
             np.random.choice(self.shelfs, size=self.request_queue_size, replace=False)
         )
         self.observation_space_mapper.extract_environment_info(self)
-        return tuple([self.observation_space_mapper.observation(agent) for agent in self.agents])
+        info = self._build_info(
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        return tuple([self.observation_space_mapper.observation(agent) for agent in self.agents]), info
 
     def step(
         self, macro_actions: List[int]
@@ -696,7 +765,7 @@ class Warehouse(gym.Env):
             stucks_count,
             shelf_deliveries,
         )
-        return new_obs, list(rewards), terminateds, terminateds, info
+        return new_obs, list(rewards), terminateds, truncateds, info
 
     def _build_info(
         self,
@@ -751,6 +820,12 @@ class Warehouse(gym.Env):
             from tarware.rendering import Viewer
             self.renderer = Viewer(self.grid_size)
         return self.renderer.render(self, return_rgb_array=mode == "rgb_array")
+    
+    def _is_deactivation_region(self, x: int, y: int) -> bool:
+        return (x, y) in self.deactivation_region
+    
+    def _is_activation_region(self, x: int, y: int) -> bool:
+        return (x, y) in self.activation_region
 
     def close(self):
         if self.renderer:
@@ -759,3 +834,6 @@ class Warehouse(gym.Env):
     def seed(self, seed=None):
         np.random.seed(seed)
         random.seed(seed)
+
+    def get_agent_types(self):
+        return self._agent_types

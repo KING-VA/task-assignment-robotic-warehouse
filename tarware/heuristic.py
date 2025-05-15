@@ -25,13 +25,16 @@ class Mission:
 
 def heuristic_episode(env, render=False, seed=None):
     # non_goal_location_ids corresponds to the item ordering in `get_empty_shelf_information`
+    print(env.action_id_to_coords_map)
     non_goal_location_ids = []
+    open_deactivation_region = env.deactivation_region.copy()
     for id_, coords in env.action_id_to_coords_map.items():
-        if (coords[1], coords[0]) not in env.goals:
+        if (coords[1], coords[0]) not in env.goals and coords[0] != 0:
+            # 0 is the deactivation region
             non_goal_location_ids.append(id_)
     non_goal_location_ids = np.array(non_goal_location_ids)
     location_map =  env.action_id_to_coords_map
-    _ = env.reset(seed=seed)
+    _, _ = env.reset(seed=seed)
     done = False
     all_infos = []
     timestep = 0
@@ -131,6 +134,13 @@ def heuristic_episode(env, render=False, seed=None):
             actions[agv] = mission.location_id if not agv.busy else 0
         for picker, mission in assigned_pickers.items():
             actions[picker] = mission.location_id
+        # For pickers and AGVs not assigned a mission, set to deactivation region
+        for agent in agents:
+            if agent not in assigned_agvs and agent not in assigned_pickers:
+                # Check if deactivation region is open and if so set to deactivation region
+                if open_deactivation_region:
+                    coord_x, coord_y = open_deactivation_region.pop(0)
+                    actions[agent] = coords_original_loc_map[(coord_y, coord_x)]
         # macro_action should be the index of self.action_id_to_coords_map
         if render:
             env.render(mode="human")

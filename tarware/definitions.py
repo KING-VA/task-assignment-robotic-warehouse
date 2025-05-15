@@ -12,6 +12,8 @@ class Action(Enum):
     RIGHT = 2
     FORWARD = 3
     TOGGLE_LOAD = 4
+    DEACTIVATE = 5
+    ACTIVATE = 6
 
 class Direction(Enum):
     UP = 0
