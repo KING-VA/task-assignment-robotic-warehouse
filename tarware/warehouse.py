@@ -220,6 +220,13 @@ class Warehouse(gym.Env):
         )
         self.observation_space = spaces.Tuple(tuple(self.observation_space_mapper.ma_spaces))
 
+        self.global_manager_obervation_space = observation_map["global"](0, 1, self.grid_size, len(self.action_id_to_coords_map)-len(self.goals), normalised_coordinates)
+
+        # Option A: Discrete subgoal assignment
+        self.manager_action_space = spaces.MultiDiscrete([self.action_size] * self.num_agents)
+        # Option B: Full mask assignment
+        # self.manager_action_space = spaces.Box(low=0, high=1, shape=(self.num_agents, self.action_size), dtype=np.int8)
+
         self.request_queue_size = request_queue_size
         self.request_queue = []
         self.rack_groups = find_sections(list([loc for loc in self.action_id_to_coords_map.values() if (loc[1], loc[0]) not in self.goals + self.deactivation_region + self.activation_region]))
@@ -373,15 +380,15 @@ class Warehouse(gym.Env):
         request_item_map = np.zeros(len(self.shelfs))
         requested_shelf_ids = [shelf.id for shelf in self.request_queue]
         for id_, coords in self.action_id_to_coords_map.items():
-            if (coords[1], coords[0]) not in self.goals and coords[0] != 0:
+            if (coords[1], coords[0]) not in self.goals and coords[1] != 0:
                 if self.grid[CollisionLayers.SHELVES, coords[0], coords[1]] in requested_shelf_ids:
-                    request_item_map[id_ - len(self.goals) - 1] = 1
+                    request_item_map[id_ - len(self.goals) - len(self.deactivation_region) - len(self.activation_region) - 1] = 1
         return request_item_map
 
     def get_empty_shelf_information(self) -> np.ndarray[int]:
         empty_item_map = np.zeros(len(self.shelfs))
         for id_, coords in self.action_id_to_coords_map.items():
-            if (coords[1], coords[0]) not in self.goals and coords[0] != 0:
+            if (coords[1], coords[0]) not in self.goals and coords[1] != 0:
                 if self.grid[CollisionLayers.SHELVES, coords[0], coords[1]] == 0 and (
                     self.grid[CollisionLayers.CARRIED_SHELVES, coords[0], coords[1]] == 0
                     or self.agents[
@@ -399,8 +406,13 @@ class Warehouse(gym.Env):
         for agent, macro_action in zip(self.agents, macro_actions):
             # Initialize action for step
             agent.req_action = Action.NOOP if agent.pending_deactivation else Action.DEACTIVATE
-            set_to_deactivate = macro_action in self.action_id_to_coords_map and self.action_id_to_coords_map[macro_action] in self.deactivation_region
-            set_to_activate = macro_action in self.action_id_to_coords_map and self.action_id_to_coords_map[macro_action] in self.activation_region
+            if macro_action in self.action_id_to_coords_map:
+                req_y, req_x = self.action_id_to_coords_map[macro_action] 
+                set_to_deactivate = self._is_activation_region(req_x, req_y)
+                set_to_activate = self._is_deactivation_region(req_x, req_y)
+            else:
+                set_to_deactivate = False
+                set_to_activate = False
             # Collision avoidance logic
             if agent.fixing_clash > 0:
                 agent.fixing_clash -= 1
@@ -431,7 +443,7 @@ class Warehouse(gym.Env):
                     agent.req_action = get_next_micro_action(agent.x, agent.y, agent.dir, agent.path[0])
                     agvs_distance_travelled += int(agent.type == AgentType.AGV)
                     pickrs_distance_travelled += int(agent.type == AgentType.PICKER)
-                if len(agent.path) == 1 and not agent.pending_deactivation or agent.pending_activation:
+                if len(agent.path) == 1 and not (agent.pending_deactivation or agent.pending_activation):
                     # If agent is at the end of a path and carrying a shelf and the target location is already occupied, restart agent
                     if agent.carrying_shelf and self.grid[CollisionLayers.SHELVES, agent.path[-1][1], agent.path[-1][0]]:
                         agent.req_action = Action.NOOP
@@ -792,15 +804,15 @@ class Warehouse(gym.Env):
         requested_items = self.get_shelf_request_information()
         empty_items = self.get_empty_shelf_information()
         carrying_shelf_info = self.get_carrying_shelf_information()
-        targets_agvs = [target - len(self.goals) - 1 for target in self.targets_agvs if target > len(self.goals)]
-        targets_pickers = [target - len(self.goals) - 1 for target in self.targets_pickers if target > len(self.goals)]
+        targets_agvs = [target - len(self.goals) - len(self.deactivation_region) - len(self.activation_region) - 1 for target in self.targets_agvs if target > len(self.goals)]
+        targets_pickers = [target - len(self.goals) - len(self.deactivation_region) - len(self.activation_region) - 1 for target in self.targets_pickers if target > len(self.goals)]
         # Compute valid location list for AGVs
         valid_location_list_agvs = np.array([
             empty_items if carrying_shelf else requested_items for carrying_shelf in carrying_shelf_info
         ])
         # Compute valid location list for Pickers
         if pickers_to_agvs:
-            valid_location_list_pickers = np.zeros(len(self.action_id_to_coords_map) - len(self.goals))
+            valid_location_list_pickers = np.zeros(len(self.action_id_to_coords_map) - len(self.goals) - len(self.deactivation_region) - len(self.activation_region))
             valid_location_list_pickers[targets_agvs] = 1
         else:
             valid_location_list_pickers = requested_items
@@ -809,13 +821,20 @@ class Warehouse(gym.Env):
             valid_location_list_agvs[:, targets_agvs] = 0
             valid_location_list_pickers[targets_pickers] = 0
         valid_action_masks = np.ones((self.num_agents, self.action_size))
-        valid_action_masks[:self.num_agvs,  1 + len(self.goals):] = valid_location_list_agvs
-        valid_action_masks[:self.num_agvs,  1 : 1 + len(self.goals)] = np.repeat(np.expand_dims(np.array(carrying_shelf_info), 1), len(self.goals), axis=1)
-        valid_action_masks[self.num_agvs:,  1 + len(self.goals):] = valid_location_list_pickers
-        valid_action_masks[self.num_agvs:,  1 : 1 + len(self.goals)] = 0
+        # TODO -- Need to fix the logic here
+        valid_action_masks[:self.num_agvs,  1 + len(self.goals) + len(self.deactivation_region) + len(self.activation_region):] = valid_location_list_agvs
+        goal_location_mask = np.repeat(np.expand_dims(np.array(carrying_shelf_info), 1), len(self.goals), axis=1)
+        deactivation_activation_mask = np.zeros((self.num_agvs, len(self.deactivation_region) + len(self.activation_region)))
+        prelim_mask = np.concatenate((goal_location_mask, deactivation_activation_mask), axis=1)
+        # print(f"Prelim mask: {prelim_mask}")
+        # print(f"Goal location mask: {goal_location_mask}")
+        # print(f"Deactivation activation mask: {deactivation_activation_mask}")
+        valid_action_masks[:self.num_agvs,  1 : 1 + len(self.goals) + len(self.deactivation_region) + len(self.activation_region)] = prelim_mask
+        valid_action_masks[self.num_agvs:,  1 + len(self.goals) + len(self.deactivation_region) + len(self.activation_region):] = valid_location_list_pickers
+        valid_action_masks[self.num_agvs:,  1 : 1 + len(self.goals) + len(self.deactivation_region) + len(self.activation_region)] = 0
         return valid_action_masks
 
-    def render(self, mode="human"):
+    def render(self, mode="rgb_array"):
         if not self.renderer:
             from tarware.rendering import Viewer
             self.renderer = Viewer(self.grid_size)

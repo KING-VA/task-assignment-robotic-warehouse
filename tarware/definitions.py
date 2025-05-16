@@ -5,6 +5,7 @@ class AgentType(Enum):
     AGV = 0
     PICKER = 1
     AGENT = 2
+    MANAGER = 3
 
 class Action(Enum):
     NOOP = 0
