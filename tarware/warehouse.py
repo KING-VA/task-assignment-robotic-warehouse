@@ -368,6 +368,8 @@ class Warehouse(gym.Env):
             if shelf.id not in carried_shelf_ids:
                 self.grid[CollisionLayers.SHELVES, shelf.y, shelf.x] = shelf.id
         for agent in self.agents:
+            if not (0 <= agent.x < self.grid_size[1] and 0 <= agent.y < self.grid_size[0]):
+                raise ValueError(f"Agent {agent.id} position out of bounds: ({agent.x}, {agent.y})")
             layer = CollisionLayers.PICKERS if agent.type == AgentType.PICKER else CollisionLayers.AGVS
             self.grid[layer, agent.y, agent.x] = agent.id
             if agent.carrying_shelf:
@@ -399,68 +401,96 @@ class Warehouse(gym.Env):
                     empty_item_map[id_ - len(self.goals) - len(self.deactivation_region) - len(self.activation_region) - 1] = 1
         return empty_item_map
 
+    # def attribute_macro_actions(self, macro_actions: List[int]) -> Tuple[int, int]:
+    #     agvs_distance_travelled = 0
+    #     pickrs_distance_travelled = 0
+    #     # Logic for Macro Actions
+    #     for agent, macro_action in zip(self.agents, macro_actions):
+    #         # Initialize action for step
+    #         agent.req_action = Action.NOOP if agent.pending_deactivation else Action.DEACTIVATE
+    #         if macro_action in self.action_id_to_coords_map:
+    #             req_y, req_x = self.action_id_to_coords_map[macro_action] 
+    #             set_to_deactivate = self._is_activation_region(req_x, req_y)
+    #             set_to_activate = self._is_deactivation_region(req_x, req_y)
+    #         else:
+    #             set_to_deactivate = False
+    #             set_to_activate = False
+    #         # Collision avoidance logic
+    #         if agent.fixing_clash > 0:
+    #             agent.fixing_clash -= 1
+    #         if not agent.busy:
+    #             # Check to see if the target is a deactivation action
+    #             if set_to_deactivate:
+    #                 agent.pending_deactivation = True
+    #             if (agent.deactivated or agent.pending_deactivation) and set_to_activate:
+    #                 # If agent is deactivated or pending and set to a deactivate location again, revive it
+    #                 agent.pending_activation = True
+
+    #             agent.target = 0
+    #             if macro_action != 0:
+    #                 agent.path = self.find_path((agent.y, agent.x), self.action_id_to_coords_map[macro_action], agent, care_for_agents=False)
+    #                 if agent.path:
+    #                     agent.busy = True
+    #                     agent.target = macro_action
+    #                     agent.req_action = get_next_micro_action(agent.x, agent.y, agent.dir, agent.path[0])
+    #                     self.stuck_counters[agent.id - 1].reset((agent.x, agent.y))
+    #         else:
+    #             # Check if agent finished the given path, if not continue the path
+    #             if agent.path == []:
+    #                 if agent.type in [AgentType.AGV, AgentType.AGENT]:
+    #                     agent.req_action = Action.TOGGLE_LOAD
+    #                 if agent.type == AgentType.PICKER or agent.pending_deactivation or agent.pending_activation:
+    #                     agent.busy = False
+    #             else:
+    #                 agent.req_action = get_next_micro_action(agent.x, agent.y, agent.dir, agent.path[0])
+    #                 agvs_distance_travelled += int(agent.type == AgentType.AGV)
+    #                 pickrs_distance_travelled += int(agent.type == AgentType.PICKER)
+    #             if len(agent.path) == 1 and not (agent.pending_deactivation or agent.pending_activation):
+    #                 # If agent is at the end of a path and carrying a shelf and the target location is already occupied, restart agent
+    #                 if agent.carrying_shelf and self.grid[CollisionLayers.SHELVES, agent.path[-1][1], agent.path[-1][0]]:
+    #                     agent.req_action = Action.NOOP
+    #                     agent.busy = False
+    #                 # Logic for Pickers to load shelves if AGV is present at location or wait otherwise
+    #                 if agent.type == AgentType.PICKER:
+    #                     if (
+    #                         self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]] == 0
+    #                         or self.agents[self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]]- 1].req_action != Action.TOGGLE_LOAD
+    #                     ):
+    #                         agent.req_action = Action.NOOP
+    #                     elif (
+    #                         self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]] != 0
+    #                         and self.agents[self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]] - 1].req_action == Action.TOGGLE_LOAD
+    #                         ):
+    #                         self.stuck_counters[agent.id - 1].reset((agent.x, agent.y))
+    #     return agvs_distance_travelled, pickrs_distance_travelled
+
     def attribute_macro_actions(self, macro_actions: List[int]) -> Tuple[int, int]:
         agvs_distance_travelled = 0
         pickrs_distance_travelled = 0
-        # Logic for Macro Actions
         for agent, macro_action in zip(self.agents, macro_actions):
-            # Initialize action for step
             agent.req_action = Action.NOOP if agent.pending_deactivation else Action.DEACTIVATE
             if macro_action in self.action_id_to_coords_map:
-                req_y, req_x = self.action_id_to_coords_map[macro_action] 
-                set_to_deactivate = self._is_activation_region(req_x, req_y)
-                set_to_activate = self._is_deactivation_region(req_x, req_y)
-            else:
-                set_to_deactivate = False
-                set_to_activate = False
-            # Collision avoidance logic
-            if agent.fixing_clash > 0:
-                agent.fixing_clash -= 1
-            if not agent.busy:
-                # Check to see if the target is a deactivation action
-                if set_to_deactivate:
-                    agent.pending_deactivation = True
-                if (agent.deactivated or agent.pending_deactivation) and set_to_activate:
-                    # If agent is deactivated or pending and set to a deactivate location again, revive it
-                    agent.pending_activation = True
-
-                agent.target = 0
-                if macro_action != 0:
-                    agent.path = self.find_path((agent.y, agent.x), self.action_id_to_coords_map[macro_action], agent, care_for_agents=False)
-                    if agent.path:
-                        agent.busy = True
-                        agent.target = macro_action
-                        agent.req_action = get_next_micro_action(agent.x, agent.y, agent.dir, agent.path[0])
-                        self.stuck_counters[agent.id - 1].reset((agent.x, agent.y))
-            else:
-                # Check if agent finished the given path, if not continue the path
-                if agent.path == []:
-                    if agent.type in [AgentType.AGV, AgentType.AGENT]:
-                        agent.req_action = Action.TOGGLE_LOAD
-                    if agent.type == AgentType.PICKER or agent.pending_deactivation or agent.pending_activation:
-                        agent.busy = False
+                target_coords = self.action_id_to_coords_map[macro_action]
+                agent.target = macro_action
+                # Compute the full path to the target
+                agent.path = self.find_path((agent.y, agent.x), target_coords, agent, care_for_agents=False)
+                if agent.path:
+                    agent.busy = True
                 else:
-                    agent.req_action = get_next_micro_action(agent.x, agent.y, agent.dir, agent.path[0])
-                    agvs_distance_travelled += int(agent.type == AgentType.AGV)
-                    pickrs_distance_travelled += int(agent.type == AgentType.PICKER)
-                if len(agent.path) == 1 and not (agent.pending_deactivation or agent.pending_activation):
-                    # If agent is at the end of a path and carrying a shelf and the target location is already occupied, restart agent
-                    if agent.carrying_shelf and self.grid[CollisionLayers.SHELVES, agent.path[-1][1], agent.path[-1][0]]:
-                        agent.req_action = Action.NOOP
-                        agent.busy = False
-                    # Logic for Pickers to load shelves if AGV is present at location or wait otherwise
-                    if agent.type == AgentType.PICKER:
-                        if (
-                            self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]] == 0
-                            or self.agents[self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]]- 1].req_action != Action.TOGGLE_LOAD
-                        ):
-                            agent.req_action = Action.NOOP
-                        elif (
-                            self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]] != 0
-                            and self.agents[self.grid[CollisionLayers.AGVS, agent.path[-1][1], agent.path[-1][0]] - 1].req_action == Action.TOGGLE_LOAD
-                            ):
-                            self.stuck_counters[agent.id - 1].reset((agent.x, agent.y))
+                    agent.busy = False
+            else:
+                agent.target = 0
+                agent.path = []
+                agent.busy = False
+            # Compute the manhattan distance to the target
+            if agent.path:
+                distance = abs(agent.path[-1][0] - agent.y) + abs(agent.path[-1][1] - agent.x)
+                if agent.type == AgentType.AGV:
+                    agvs_distance_travelled += distance
+                elif agent.type == AgentType.PICKER:
+                    pickrs_distance_travelled += distance
         return agvs_distance_travelled, pickrs_distance_travelled
+
 
     def resolve_move_conflict(self, agent_list):
         commited_agents = set()
@@ -741,43 +771,110 @@ class Warehouse(gym.Env):
         )
         return tuple([self.observation_space_mapper.observation(agent) for agent in self.agents]), info
 
+    # def step(
+    #     self, macro_actions: List[int]
+    # ) -> Tuple[List[np.ndarray], List[float], List[bool], List[bool], Dict]:
+    #     # Attribute macro actions to agents and resolve conflicts
+    #     agvs_distance_travelled, pickers_distance_travelled = self.attribute_macro_actions(macro_actions)
+    #     clashes_count = self.resolve_move_conflict(self.agents)
+    #     # Restart agents if they are stuck at the same position
+    #     stucks_count = self.resolve_stuck_agents()
+
+    #     rewards = np.zeros(self.num_agents)
+    #     # Apply penalty for inactivity
+    #     rewards -= 0.001
+    #     # Execute micro actions
+    #     rewards = self.execute_micro_actions(rewards)
+    #     # Process shelf deliveries
+    #     rewards, shelf_deliveries = self.process_shelf_deliveries(rewards)
+
+    #     self._recalc_grid()
+    #     self._cur_steps += 1
+    #     if (
+    #         self.max_inactivity_steps
+    #         and self._cur_inactive_steps >= self.max_inactivity_steps
+    #     ) or (self.max_steps and self._cur_steps >= self.max_steps):
+    #         terminateds = truncateds = self.num_agents * [True]
+    #     else:
+    #         terminateds = truncateds =  self.num_agents * [False]
+
+    #     self.observation_space_mapper.extract_environment_info(self)
+    #     new_obs = tuple([self.observation_space_mapper.observation(agent) for agent in self.agents])
+    #     info = self._build_info(
+    #         agvs_distance_travelled,
+    #         pickers_distance_travelled,
+    #         clashes_count,
+    #         stucks_count,
+    #         shelf_deliveries,
+    #     )
+    #     return new_obs, list(rewards), terminateds, truncateds, info
+
+    def execute_macro_actions(self, rewards: np.ndarray[int]) -> np.ndarray[int]:
+        # Only handle loading/unloading at the new position
+        for agent in self.agents:
+            if agent.deactivated:
+                rewards[agent.id - 1] += 0.001
+            elif agent.target and agent.target in self.action_id_to_coords_map:
+                # Check to see if coord_map is activation or deactivation region
+                req_y, req_x = self.action_id_to_coords_map[agent.target]
+                set_to_activate = self._is_activation_region(req_x, req_y)
+                set_to_deactivate = self._is_deactivation_region(req_x, req_y)
+                if set_to_deactivate:
+                    agent.deactivate()
+                elif (agent.deactivated or agent.pending_deactivation) and set_to_activate:
+                    # If agent is deactivated or pending and set to a deactivate location again, revive it
+                    agent.revive()
+                else:
+                    # If agent is at a shelf and not carrying, try to load
+                    if not agent.carrying_shelf:
+                        rewards = self._execute_load(agent, rewards)
+                    else:
+                        rewards = self._execute_unload(agent, rewards)
+        return rewards
+
     def step(
-        self, macro_actions: List[int]
-    ) -> Tuple[List[np.ndarray], List[float], List[bool], List[bool], Dict]:
+    self, macro_actions: List[int]
+) -> Tuple[List[np.ndarray], List[float], List[bool], List[bool], Dict]:
         # Attribute macro actions to agents and resolve conflicts
         agvs_distance_travelled, pickers_distance_travelled = self.attribute_macro_actions(macro_actions)
-        clashes_count = self.resolve_move_conflict(self.agents)
-        # Restart agents if they are stuck at the same position
-        stucks_count = self.resolve_stuck_agents()
-
-        rewards = np.zeros(self.num_agents)
-        # Apply penalty for inactivity
-        rewards -= 0.001
-        # Execute micro actions
-        rewards = self.execute_micro_actions(rewards)
-        # Process shelf deliveries
-        rewards, shelf_deliveries = self.process_shelf_deliveries(rewards)
-
+        # Move all agents along their full path in one step
+        for agent in self.agents:
+            if agent.busy and agent.path:
+                final_pos = agent.path[-1]
+                new_x, new_y = final_pos[0], final_pos[1]
+                if 0 <= new_x < self.grid_size[1] and 0 <= new_y < self.grid_size[0]:
+                    agent.x, agent.y = new_x, new_y
+                    if agent.carrying_shelf:
+                        agent.carrying_shelf.x, agent.carrying_shelf.y = agent.x, agent.y
+                else:
+                    print(f"WARNING: Agent {agent.id} tried to move out of bounds to ({new_x}, {new_y})")
+                agent.busy = False
+                agent.path = []
+        # Recalculate grid and process rewards as before
         self._recalc_grid()
+        rewards = np.zeros(self.num_agents)
+        rewards -= 0.001  # inactivity penalty
+        rewards = self.execute_macro_actions(rewards)  # see below
+        rewards, shelf_deliveries = self.process_shelf_deliveries(rewards)
         self._cur_steps += 1
+        terminateds = truncateds = [False] * self.num_agents
         if (
             self.max_inactivity_steps
             and self._cur_inactive_steps >= self.max_inactivity_steps
         ) or (self.max_steps and self._cur_steps >= self.max_steps):
-            terminateds = truncateds = self.num_agents * [True]
-        else:
-            terminateds = truncateds =  self.num_agents * [False]
-
+            terminateds = truncateds = [True] * self.num_agents
         self.observation_space_mapper.extract_environment_info(self)
         new_obs = tuple([self.observation_space_mapper.observation(agent) for agent in self.agents])
         info = self._build_info(
             agvs_distance_travelled,
             pickers_distance_travelled,
-            clashes_count,
-            stucks_count,
+            0,
+            0,
             shelf_deliveries,
+            total_reward=sum(rewards)
         )
         return new_obs, list(rewards), terminateds, truncateds, info
+
 
     def _build_info(
         self,
@@ -786,6 +883,7 @@ class Warehouse(gym.Env):
         clashes_count: int,
         stucks_count:  int,
         shelf_deliveries: int,
+        total_reward: float = None,
     ) -> Dict[str, np.ndarray]:
         info = {}
         agvs_idle_time = sum([int(agent.req_action in (Action.NOOP, Action.TOGGLE_LOAD)) for agent in self.agents[:self.num_agvs]])
@@ -798,6 +896,8 @@ class Warehouse(gym.Env):
         info["pickers_distance_travelled"] = pickers_distance_travelled
         info["agvs_idle_time"] = agvs_idle_time
         info["pickers_idle_time"] = pickers_idle_time
+        if total_reward is not None:
+            info["total_reward"] = total_reward
         return info
 
     def compute_valid_action_masks(self, pickers_to_agvs=True, block_conflicting_actions=True):
